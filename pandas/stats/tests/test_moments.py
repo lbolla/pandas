@@ -7,7 +7,7 @@ from datetime import datetime
 from numpy.random import randn
 import numpy as np
 
-from pandas import Series, DataFrame, bdate_range
+from pandas import Series, DataFrame, bdate_range, isnull, notnull
 from pandas.util.testing import assert_almost_equal, assert_series_equal
 import pandas.core.datetools as datetools
 import pandas.stats.moments as mom
@@ -152,6 +152,11 @@ class TestMoments(unittest.TestCase):
             self.assert_(not np.isnan(result[-6]))
             self.assert_(np.isnan(result[-5]))
 
+            arr2 = randn(20)
+            result = func(arr2, 10, min_periods=5)
+            self.assert_(isnull(result[3]))
+            self.assert_(notnull(result[4]))
+
             # min_periods=0
             result0 = func(arr, 20, min_periods=0)
             result1 = func(arr, 20, min_periods=1)
@@ -218,6 +223,11 @@ class TestMoments(unittest.TestCase):
 
     def test_ewma(self):
         self._check_ew(mom.ewma)
+
+        arr = np.zeros(1000)
+        arr[5] = 1
+        result = mom.ewma(arr, span=100, adjust=False).sum()
+        self.assert_(np.abs(result - 1) < 1e-2)
 
     def test_ewmvar(self):
         self._check_ew(mom.ewmvar)

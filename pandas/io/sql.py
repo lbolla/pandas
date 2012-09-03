@@ -169,17 +169,17 @@ def write_frame(frame, name=None, con=None, flavor='sqlite'):
     data = [tuple(x) for x in frame.values]
     con.executemany(insert_sql, data)
 
-def get_sqlite_schema(frame, name):
+def get_sqlite_schema(frame, name, dtypes=None, keys=None):
     template = """
 CREATE TABLE %(name)s (
-  %(columns)s
+  %(columns)s%(keystr)s
 );"""
 
     column_types = []
 
-    dtypes = frame.dtypes
-    for k in dtypes.index:
-        dt = dtypes[k]
+    frame_types = frame.dtypes
+    for k in frame_types.index:
+        dt = frame_types[k]
 
         if issubclass(dt.type, (np.integer, np.bool_)):
             sqltype = 'INTEGER'
@@ -188,11 +188,19 @@ CREATE TABLE %(name)s (
         else:
             sqltype = 'TEXT'
 
+        if dtypes is not None:
+            sqltype = dtypes.get(k, sqltype)
+
         column_types.append((k, sqltype))
 
     columns = ',\n  '.join('%s %s' % x for x in column_types)
 
-    return template % {'name' : name, 'columns' : columns}
+    keystr = ''
+    if keys is not None:
+        if isinstance(keys, basestring):
+            keys = (keys,)
+        keystr = ', PRIMARY KEY (%s)' % ','.join(keys)
+    return template % {'name' : name, 'columns' : columns, 'keystr' : keystr}
 
 
 
@@ -225,5 +233,3 @@ def format_query(sql, *args):
         processed_args.append(formatter(arg))
 
     return sql % tuple(processed_args)
-
-

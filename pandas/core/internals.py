@@ -388,7 +388,7 @@ class ObjectBlock(Block):
     def should_store(self, value):
         return not issubclass(value.dtype.type,
                               (np.integer, np.floating, np.complexfloating,
-                               np.bool_))
+                               np.datetime64, np.bool_))
 
 _NS_DTYPE = np.dtype('M8[ns]')
 
@@ -863,8 +863,7 @@ class BlockManager(object):
         i, _ = self._find_block(item)
         loc = self.items.get_loc(item)
 
-        new_items = self.items._constructor(
-                np.delete(np.asarray(self.items), loc))
+        new_items = self.items.delete(loc)
 
         self._delete_from_block(i, item)
         self.set_items_norename(new_items)
@@ -899,7 +898,7 @@ class BlockManager(object):
         # new block
         self._add_new_block(item, value, loc=loc)
 
-        if len(self.blocks) > 20:
+        if len(self.blocks) > 100:
             self._consolidate_inplace()
 
     def set_items_norename(self, value):
@@ -1264,6 +1263,12 @@ def form_blocks(data, axes):
         int_block = _simple_blockify(int_dict, items, np.int64)
         blocks.append(int_block)
 
+    for k, v in list(datetime_dict.items()):
+        # hackeroo
+        if hasattr(v, 'tz') and v.tz is not None:
+            del datetime_dict[k]
+            object_dict[k] = v.asobject
+
     if len(datetime_dict):
         datetime_block = _simple_blockify(datetime_dict, items,
                                           np.dtype('M8[ns]'))
@@ -1390,7 +1395,7 @@ def _consolidate(blocks, items):
 def _merge_blocks(blocks, items):
     if len(blocks) == 1:
         return blocks[0]
-    new_values = np.vstack([b.values for b in blocks])
+    new_values = _vstack([b.values for b in blocks])
     new_items = blocks[0].items.append([b.items for b in blocks[1:]])
     new_block = make_block(new_values, new_items, items,
                            do_integrity_check=True)
@@ -1423,3 +1428,11 @@ def _union_items_slow(all_items):
         else:
             seen = seen.union(items)
     return seen
+
+def _vstack(to_stack):
+    if all(x.dtype == _NS_DTYPE for x in to_stack):
+        # work around NumPy 1.6 bug
+        new_values = np.vstack([x.view('i8') for x in to_stack])
+        return new_values.view(_NS_DTYPE)
+    else:
+        return np.vstack(to_stack)

@@ -46,13 +46,13 @@ def set_value_at(ndarray arr, object loc, object val):
 
 
 # Don't populate hash tables in monotonic indexes larger than this
-cdef int _SIZE_CUTOFF = 1000000
+_SIZE_CUTOFF = 1000000
 
 
 cdef class IndexEngine:
 
     cdef readonly:
-        object index_weakref
+        object vgetter
         HashTable mapping
         bint over_size_threshold
 
@@ -60,10 +60,10 @@ cdef class IndexEngine:
         bint unique, monotonic
         bint initialized, monotonic_check, unique_check
 
-    def __init__(self, index_weakref):
-        self.index_weakref = index_weakref
+    def __init__(self, vgetter, n):
+        self.vgetter = vgetter
 
-        self.over_size_threshold = len(index_weakref()) >= _SIZE_CUTOFF
+        self.over_size_threshold = n >= _SIZE_CUTOFF
 
         self.initialized = 0
         self.monotonic_check = 0
@@ -116,7 +116,7 @@ cdef class IndexEngine:
             if not self.is_unique:
                 return self._get_loc_duplicates(val)
             values = self._get_index_values()
-            loc = values.searchsorted(val, side='left')
+            loc = _bin_search(values, val) # .searchsorted(val, side='left')
             if util.get_value_at(values, loc) != val:
                 raise KeyError(val)
             return loc
@@ -137,7 +137,6 @@ cdef class IndexEngine:
 
         if self.is_monotonic:
             values = self._get_index_values()
-
             left = values.searchsorted(val, side='left')
             right = values.searchsorted(val, side='right')
 
@@ -149,14 +148,15 @@ cdef class IndexEngine:
             else:
                 return slice(left, right)
         else:
-            return self._get_bool_indexer(val)
+            return self._maybe_get_bool_indexer(val)
 
-    cdef _get_bool_indexer(self, object val):
+    cdef _maybe_get_bool_indexer(self, object val):
         cdef:
             ndarray[uint8_t] indexer
             ndarray[object] values
             int count = 0
             Py_ssize_t i, n
+            int last_true
 
         values = self._get_index_values()
         n = len(values)
@@ -168,11 +168,14 @@ cdef class IndexEngine:
             if values[i] == val:
                 count += 1
                 indexer[i] = 1
+                last_true = i
             else:
                 indexer[i] = 0
 
         if count == 0:
             raise KeyError(val)
+        if count == 1:
+            return last_true
 
         return result
 
@@ -206,7 +209,7 @@ cdef class IndexEngine:
         self.monotonic_check = 1
 
     cdef _get_index_values(self):
-        return self.index_weakref().values
+        return self.vgetter()
 
     cdef inline _do_unique_check(self):
         self._ensure_mapping_populated()
@@ -275,13 +278,14 @@ cdef class Int64Engine(IndexEngine):
         return _algos.backfill_int64(self._get_index_values(), other,
                                        limit=limit)
 
-    cdef _get_bool_indexer(self, object val):
+    cdef _maybe_get_bool_indexer(self, object val):
         cdef:
             ndarray[uint8_t, cast=True] indexer
             ndarray[int64_t] values
             int count = 0
             Py_ssize_t i, n
             int64_t ival
+            int last_true
 
         if not util.is_integer_object(val):
             raise KeyError(val)
@@ -298,11 +302,14 @@ cdef class Int64Engine(IndexEngine):
             if values[i] == val:
                 count += 1
                 indexer[i] = 1
+                last_true = i
             else:
                 indexer[i] = 0
 
         if count == 0:
             raise KeyError(val)
+        if count == 1:
+            return last_true
 
         return result
 
@@ -323,6 +330,32 @@ cdef class Float64Engine(IndexEngine):
     def get_backfill_indexer(self, other, limit=None):
         return _algos.backfill_float64(self._get_index_values(), other,
                                          limit=limit)
+
+
+cdef Py_ssize_t _bin_search(ndarray values, object val):
+    cdef:
+        Py_ssize_t mid, lo = 0, hi = len(values) - 1
+        object pval
+
+    if hi >= 0 and val > util.get_value_at(values, hi):
+        return len(values)
+
+    while lo < hi:
+        mid = (lo + hi) // 2
+        pval = util.get_value_at(values, mid)
+        if val < pval:
+            hi = mid
+        elif val > pval:
+            lo = mid + 1
+        else:
+            while mid > 0 and val == util.get_value_at(values, mid - 1):
+                mid -= 1
+            return mid
+
+    if val <= util.get_value_at(values, mid):
+        return mid
+    else:
+        return mid + 1
 
 _pad_functions = {
     'object' : _algos.pad_object,
@@ -370,7 +403,7 @@ cdef class DatetimeEngine(Int64Engine):
         return _to_i8(val) in self.mapping
 
     cdef _get_index_values(self):
-        return self.index_weakref().values.view('i8')
+        return self.vgetter().view('i8')
 
     def _call_monotonic(self, values):
         return _algos.is_monotonic_int64(values)
@@ -387,7 +420,7 @@ cdef class DatetimeEngine(Int64Engine):
             values = self._get_index_values()
             conv = _to_i8(val)
             loc = values.searchsorted(conv, side='left')
-            if util.get_value_at(values, loc) != conv:
+            if loc == len(values) or util.get_value_at(values, loc) != conv:
                 raise KeyError(val)
             return loc
 

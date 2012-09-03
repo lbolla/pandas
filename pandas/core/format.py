@@ -1,4 +1,5 @@
 from itertools import izip
+import sys
 
 try:
     from StringIO import StringIO
@@ -42,7 +43,8 @@ docstring_to_string = """
         multiindex key at each row, default True
     justify : {'left', 'right'}, default None
         Left or right-justify the column labels. If None uses the option from
-        the configuration in pandas.core.common, 'left' out of the box
+        the print configuration (controlled by set_printoptions), 'right' out
+        of the box.
     index_names : bool, optional
         Prints the names of the indexes, default True
     force_unicode : bool, default False
@@ -77,7 +79,7 @@ class SeriesFormatter(object):
             if footer and self.series.name:
                 footer += ', '
             footer += ("Name: %s" % str(self.series.name)
-                       if self.series.name else '')
+                       if self.series.name is not None else '')
 
         if self.length:
             if footer:
@@ -132,9 +134,17 @@ class SeriesFormatter(object):
 
 if py3compat.PY3:  # pragma: no cover
     _encode_diff = lambda x: 0
+
+    _strlen = len
 else:
     def _encode_diff(x):
-        return len(x) - len(x.decode('utf-8'))
+        return len(x) - len(x.decode(print_config.encoding))
+
+    def _strlen(x):
+        try:
+            return len(x.decode(print_config.encoding))
+        except UnicodeError:
+            return len(x)
 
 class DataFrameFormatter(object):
     """
@@ -142,6 +152,7 @@ class DataFrameFormatter(object):
 
     self.to_string() : console-friendly tabular output
     self.to_html()   : html table
+    self.to_latex()   : LaTeX tabular environment table
 
     """
 
@@ -149,12 +160,17 @@ class DataFrameFormatter(object):
 
     def __init__(self, frame, buf=None, columns=None, col_space=None,
                  header=True, index=True, na_rep='NaN', formatters=None,
-                 justify=None, float_format=None, sparsify=True,
+                 justify=None, float_format=None, sparsify=None,
                  index_names=True, **kwds):
         self.frame = frame
         self.buf = buf if buf is not None else StringIO()
         self.show_index_names = index_names
+
+        if sparsify is None:
+            sparsify = print_config.multi_sparse
+
         self.sparsify = sparsify
+
         self.float_format = float_format
         self.formatters = formatters if formatters is not None else {}
         self.na_rep = na_rep
@@ -175,63 +191,103 @@ class DataFrameFormatter(object):
         else:
             self.columns = frame.columns
 
+    def _to_str_columns(self, force_unicode=False):
+        """
+        Render a DataFrame to a list of columns (as lists of strings).
+        """
+        frame = self.frame
+
+        # may include levels names also
+        str_index = self._get_formatted_index()
+        str_columns = self._get_formatted_column_labels()
+
+        stringified = []
+
+        for i, c in enumerate(self.columns):
+            if self.header:
+                fmt_values = self._format_col(i)
+                cheader = str_columns[i]
+                max_len = max(max(_strlen(x) for x in fmt_values),
+                              max(len(x) for x in cheader))
+                if self.justify == 'left':
+                    cheader = [x.ljust(max_len) for x in cheader]
+                else:
+                    cheader = [x.rjust(max_len) for x in cheader]
+                fmt_values = cheader + fmt_values
+                stringified.append(_make_fixed_width(fmt_values,
+                                                     self.justify))
+            else:
+                stringified = [_make_fixed_width(self._format_col(i),
+                                                 self.justify)
+                               for i, c in enumerate(self.columns)]
+
+        strcols = stringified
+        if self.index:
+            strcols.insert(0, str_index)
+
+        if not py3compat.PY3:
+            if force_unicode:
+                strcols = map(lambda col: map(unicode, col), strcols)
+            else:
+                # generally everything is plain strings, which has ascii
+                # encoding.  problem is when there is a char with value over 127
+                # - everything then gets converted to unicode.
+                try:
+                    map(lambda col: map(str, col), strcols)
+                except UnicodeError:
+                    strcols = map(lambda col: map(unicode, col), strcols)
+
+        return strcols
+
     def to_string(self, force_unicode=False):
         """
         Render a DataFrame to a console-friendly tabular output.
         """
         frame = self.frame
 
-        to_write = []
+        if len(frame.columns) == 0 or len(frame.index) == 0:
+            info_line = (u'Empty %s\nColumns: %s\nIndex: %s'
+                         % (type(self.frame).__name__,
+                            frame.columns, frame.index))
+            text = info_line
+        else:
+            strcols = self._to_str_columns(force_unicode)
+            text = adjoin(1, *strcols)
+
+        self.buf.writelines(text)
+
+    def to_latex(self, force_unicode=False, column_format=None):
+        """
+        Render a DataFrame to a LaTeX tabular environment output.
+        """
+        frame = self.frame
 
         if len(frame.columns) == 0 or len(frame.index) == 0:
             info_line = (u'Empty %s\nColumns: %s\nIndex: %s'
                          % (type(self.frame).__name__,
                             frame.columns, frame.index))
-            to_write.append(info_line)
+            strcols = [[info_line]]
         else:
-            # may include levels names also
-            str_index = self._get_formatted_index()
-            str_columns = self._get_formatted_column_labels()
+            strcols = self._to_str_columns(force_unicode)
 
-            stringified = []
+        if column_format is None:
+            column_format = '|l|%s|' % '|'.join('c' for _ in strcols)
+        else:
+            assert isinstance(column_format, str)
 
-            for i, c in enumerate(self.columns):
-                if self.header:
-                    fmt_values = self._format_col(i)
-                    cheader = str_columns[i]
-                    max_len = max(max(len(x) for x in fmt_values),
-                                  max(len(x) for x in cheader))
-                    if self.justify == 'left':
-                        cheader = [x.ljust(max_len) for x in cheader]
-                    else:
-                        cheader = [x.rjust(max_len) for x in cheader]
-                    fmt_values = cheader + fmt_values
-                    stringified.append(_make_fixed_width(fmt_values,
-                                                         self.justify))
-                else:
-                    stringified = [_make_fixed_width(self._format_col(i),
-                                                     self.justify)
-                                   for i, c in enumerate(self.columns)]
+        self.buf.write('\\begin{tabular}{%s}\n' % column_format)
+        self.buf.write('\\hline\n')
 
-            if self.index:
-                to_write.append(adjoin(1, str_index, *stringified))
-            else:
-                to_write.append(adjoin(1, *stringified))
+        nlevels = frame.index.nlevels
+        for i, row in enumerate(izip(*strcols)):
+            if i == nlevels:
+                self.buf.write('\\hline\n') # End of header
+            crow = [(x.replace('_', '\\_').replace('%', '\\%').replace('&', '\\&') if x else '{}') for x in row]
+            self.buf.write(' & '.join(crow))
+            self.buf.write(' \\\\\n')
 
-        if not py3compat.PY3:
-            if force_unicode:
-                to_write = [unicode(s) for s in to_write]
-            else:
-                # generally everything is plain strings, which has ascii
-                # encoding.  problem is when there is a char with value over 127
-                # - everything then gets converted to unicode.
-                try:
-                    for s in to_write:
-                        str(s)
-                except UnicodeError:
-                    to_write = [unicode(s) for s in to_write]
-
-        self.buf.writelines(to_write)
+        self.buf.write('\\hline\n')
+        self.buf.write('\\end{tabular}\n')
 
     def _format_col(self, i):
         col = self.columns[i]
@@ -241,7 +297,7 @@ class DataFrameFormatter(object):
                             na_rep=self.na_rep,
                             space=self.col_space)
 
-    def to_html(self):
+    def to_html(self, classes=None):
         """
         Render a DataFrame to a html table.
         """
@@ -261,8 +317,11 @@ class DataFrameFormatter(object):
         def write_td(s, indent=0):
             write('<td>%s</td>' % _str(s), indent)
 
-        def write_tr(l, indent=0, indent_delta=4, header=False):
-            write('<tr>', indent)
+        def write_tr(l, indent=0, indent_delta=4, header=False, align=None):
+            if align is None:
+                write('<tr>', indent)
+            else:
+                write('<tr style="text-align: %s;">' % align, indent)
             indent += indent_delta
             if header:
                 for s in l:
@@ -277,19 +336,31 @@ class DataFrameFormatter(object):
         indent_delta = 2
         frame = self.frame
 
-        write('<table border="1">', indent)
+        _classes = ['dataframe'] # Default class.
+        if classes is not None:
+            if isinstance(classes, str):
+                classes = classes.split()
+            assert isinstance(classes, (list, tuple))
+            _classes.extend(classes)
+        write('<table border="1" class="%s">' % ' '.join(_classes), indent)
 
         def _column_header():
-            row = [''] * (frame.index.nlevels - 1)
+            if self.index:
+                row = [''] * (frame.index.nlevels - 1)
+            else:
+                row = []
 
             if isinstance(self.columns, MultiIndex):
-                if self.has_column_names:
+                if self.has_column_names and self.index:
                     row.append(single_column_table(self.columns.names))
                 else:
                     row.append('')
-                row.extend([single_column_table(c) for c in self.columns])
+                style = "text-align: %s;" % self.justify
+                row.extend([single_column_table(c, self.justify, style) for
+                    c in self.columns])
             else:
-                row.append(self.columns.name or '')
+                if self.index:
+                    row.append(self.columns.name or '')
                 row.extend(self.columns)
             return row
 
@@ -310,7 +381,12 @@ class DataFrameFormatter(object):
 
                 col_row = _column_header()
                 indent += indent_delta
-                write_tr(col_row, indent, indent_delta, header=True)
+                if isinstance(self.columns, MultiIndex):
+                    align = None
+                else:
+                    align = self.justify
+                write_tr(col_row, indent, indent_delta, header=True,
+                        align=align)
                 if self.has_index_names:
                     row = frame.index.names + [''] * len(self.columns)
                     write_tr(row, indent, indent_delta, header=True)
@@ -335,12 +411,20 @@ class DataFrameFormatter(object):
                 fmt_values[i] = self._format_col(i)
 
             # write values
+            index_formatter = self.formatters.get('__index__', None)
             for i in range(len(frame)):
                 row = []
-                if isinstance(frame.index, MultiIndex):
-                    row.extend(_maybe_bold_row(frame.index[i]))
-                else:
-                    row.append(_maybe_bold_row(frame.index[i]))
+
+                if self.index:
+                    index_value = frame.index[i]
+                    if index_formatter:
+                        index_value = index_formatter(index_value)
+
+                    if isinstance(frame.index, MultiIndex):
+                        row.extend(_maybe_bold_row(index_value))
+                    else:
+                        row.append(_maybe_bold_row(index_value))
+
                 for j in range(len(self.columns)):
                     row.append(fmt_values[j][i])
                 write_tr(row, indent, indent_delta)
@@ -395,6 +479,7 @@ class DataFrameFormatter(object):
         return _has_names(self.frame.columns)
 
     def _get_formatted_index(self):
+        # Note: this is only used by to_string(), not by to_html().
         index = self.frame.index
         columns = self.frame.columns
 
@@ -496,7 +581,9 @@ class GenericArrayFormatter(object):
             float_format = self.float_format
 
         if use_unicode:
-            formatter = _stringify if self.formatter is None else self.formatter
+            def _strify(x):
+                return _stringify(x, print_config.encoding)
+            formatter = _strify if self.formatter is None else self.formatter
         else:
             formatter = str if self.formatter is None else self.formatter
 
@@ -594,26 +681,14 @@ def _format_datetime64(x, tz=None):
         return 'NaT'
 
     stamp = lib.Timestamp(x, tz=tz)
-    base = stamp.strftime('%Y-%m-%d %H:%M:%S')
-
-    fraction = stamp.microsecond * 1000 + stamp.nanosecond
-    digits = 9
-
-    if fraction == 0:
-        return base
-
-    while (fraction % 10) == 0:
-        fraction /= 10
-        digits -= 1
-
-    return base + ('.%%.%id' % digits) % fraction
+    return stamp._repr_base
 
 
 def _make_fixed_width(strings, justify='right'):
     if len(strings) == 0:
         return strings
 
-    max_len = max(len(x) for x in strings)
+    max_len = max(_strlen(x) for x in strings)
     conf_max = print_config.max_colwidth
     if conf_max is not None and max_len > conf_max:
         max_len = conf_max
@@ -624,7 +699,12 @@ def _make_fixed_width(strings, justify='right'):
         justfunc = lambda self, x: self.rjust(x)
 
     def just(x):
-        return justfunc(x[:max_len], max_len)
+        try:
+            eff_len = max_len + _encode_diff(x)
+        except UnicodeError:
+            eff_len = max_len
+
+        return justfunc(x[:eff_len], eff_len)
 
     return [just(x) for x in strings]
 
@@ -646,8 +726,13 @@ def _trim_zeros(str_floats, na_rep='NaN'):
     return [x[:-1] if x.endswith('.') and x != na_rep else x for x in trimmed]
 
 
-def single_column_table(column):
-    table = '<table><tbody>'
+def single_column_table(column, align=None, style=None):
+    table = '<table'
+    if align is not None:
+        table += (' align="%s"' % align)
+    if style is not None:
+        table += (' style="%s"' % style)
+    table += '><tbody>'
     for i in column:
         table += ('<tr><td>%s</td></tr>' % str(i))
     table += '</tbody></table>'
@@ -672,9 +757,10 @@ def _has_names(index):
 # Global formatting options
 
 def set_printoptions(precision=None, column_space=None, max_rows=None,
-                     max_columns=None, colheader_justify='right',
-                     max_colwidth=50, notebook_repr_html=None,
-                     date_dayfirst=None, date_yearfirst=None):
+                     max_columns=None, colheader_justify=None,
+                     max_colwidth=None, notebook_repr_html=None,
+                     date_dayfirst=None, date_yearfirst=None,
+                     multi_sparse=None, encoding=None):
     """
     Alter default behavior of DataFrame.toString
 
@@ -698,6 +784,9 @@ def set_printoptions(precision=None, column_space=None, max_rows=None,
         When True, prints and parses dates with the day first, eg 20/01/2005
     date_yearfirst : boolean
         When True, prints and parses dates with the year first, eg 2005/01/20
+    multi_sparse : boolean
+        Default True, "sparsify" MultiIndex display (don't display repeated
+        elements in outer levels within groups)
     """
     if precision is not None:
         print_config.precision = precision
@@ -717,6 +806,10 @@ def set_printoptions(precision=None, column_space=None, max_rows=None,
         print_config.date_dayfirst = date_dayfirst
     if date_yearfirst is not None:
         print_config.date_yearfirst = date_yearfirst
+    if multi_sparse is not None:
+        print_config.multi_sparse = multi_sparse
+    if encoding is not None:
+        print_config.encoding = encoding
 
 def reset_printoptions():
     print_config.reset()
@@ -846,6 +939,10 @@ class _GlobalPrintConfig(object):
         self.notebook_repr_html = True
         self.date_dayfirst = False
         self.date_yearfirst = False
+        self.multi_sparse = True
+        self.encoding = sys.getdefaultencoding()
+        if self.encoding == 'ascii':
+            self.encoding = 'UTF8'
 
     def reset(self):
         self.__init__()

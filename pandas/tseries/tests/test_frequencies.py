@@ -11,6 +11,7 @@ from pandas import Index, DatetimeIndex, date_range
 
 from pandas.tseries.frequencies import to_offset, infer_freq
 from pandas.tseries.tools import to_datetime
+import pandas.tseries.frequencies as fmod
 import pandas.tseries.offsets as offsets
 
 import pandas.lib as lib
@@ -186,11 +187,25 @@ class TestFrequencyInference(unittest.TestCase):
         rng = rng[::-1]
         self.assert_(rng.inferred_freq is None)
 
+    def test_non_datetimeindex(self):
+        rng = _dti(['1/31/2000', '1/31/2001', '1/31/2002'])
+
+        vals = rng.to_pydatetime()
+
+        result = infer_freq(vals)
+        self.assertEqual(result, rng.inferred_freq)
+
 MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP',
           'OCT', 'NOV', 'DEC']
+
+def test_is_superperiod_subperiod():
+    assert(fmod.is_superperiod(offsets.YearEnd(), offsets.MonthEnd()))
+    assert(fmod.is_subperiod(offsets.MonthEnd(), offsets.YearEnd()))
+
+    assert(fmod.is_superperiod(offsets.Hour(), offsets.Minute()))
+    assert(fmod.is_subperiod(offsets.Minute(), offsets.Hour()))
 
 if __name__ == '__main__':
     import nose
     nose.runmodule(argv=[__file__,'-vvs','-x','--pdb', '--pdb-failure'],
                    exit=False)
-

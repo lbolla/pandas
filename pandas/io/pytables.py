@@ -18,7 +18,7 @@ from pandas.tseries.api import PeriodIndex, DatetimeIndex
 from pandas.core.common import adjoin
 from pandas.core.algorithms import match, unique
 
-from pandas.core.factor import Factor
+from pandas.core.categorical import Factor
 from pandas.core.common import _asarray_tuplesafe
 from pandas.core.internals import BlockManager, make_block
 from pandas.core.reshape import block2d_to_block3d
@@ -277,11 +277,12 @@ class HDFStore(object):
         -------
         obj : type of object stored in file
         """
+        exc_type = _tables().NoSuchNodeError
         try:
             group = getattr(self.handle.root, key)
             return self._read_group(group)
-        except AttributeError:
-            raise
+        except (exc_type, AttributeError):
+            raise KeyError('No object named %s in the file' % key)
 
     def select(self, key, where=None):
         """
@@ -555,10 +556,6 @@ class HDFStore(object):
 
     def _write_index(self, group, key, index):
         if isinstance(index, MultiIndex):
-            if len(index) == 0:
-                raise ValueError('Can not write empty structure, '
-                                 'axis length was 0')
-
             setattr(group._v_attrs, '%s_variety' % key, 'multi')
             self._write_multi_index(group, key, index)
         elif isinstance(index, BlockIndex):
@@ -568,10 +565,6 @@ class HDFStore(object):
             setattr(group._v_attrs, '%s_variety' % key, 'sparseint')
             self._write_sparse_intindex(group, key, index)
         else:
-            if len(index) == 0:
-                raise ValueError('Can not write empty structure, '
-                                 'axis length was 0')
-
             setattr(group._v_attrs, '%s_variety' % key, 'regular')
             converted, kind, _ = _convert_index(index)
             self._write_array(group, key, converted)
@@ -657,7 +650,7 @@ class HDFStore(object):
             names.append(name)
 
             label_key = '%s_label%d' % (key, i)
-            lab = getattr(group, label_key)[:]
+            lab = _read_array(group, label_key)
             labels.append(lab)
 
         return MultiIndex(levels=levels, labels=labels, names=names)
@@ -716,9 +709,16 @@ class HDFStore(object):
             vlarr.append(value)
         elif value.dtype.type == np.datetime64:
             self.handle.createArray(group, key, value.view('i8'))
-            group._v_attrs.value_type = 'datetime64'
+            getattr(group, key)._v_attrs.value_type = 'datetime64'
         else:
-            self.handle.createArray(group, key, value)
+            if any(x == 0 for x in value.shape):
+                # ugly hack for length 0 axes
+                arr = np.empty((1,) * value.ndim)
+                self.handle.createArray(group, key, arr)
+                getattr(group, key)._v_attrs.value_type = str(value.dtype)
+                getattr(group, key)._v_attrs.shape = value.shape
+            else:
+                self.handle.createArray(group, key, value)
 
     def _write_table(self, group, items=None, index=None, columns=None,
                      values=None, append=False, compression=None):
@@ -804,7 +804,11 @@ class HDFStore(object):
 
     def _read_series(self, group, where=None):
         index = self._read_index(group, 'index')
-        values = _read_array(group, 'values')
+        if len(index) > 0:
+            values = _read_array(group, 'values')
+        else:
+            values = []
+
         name = getattr(group._v_attrs, 'name', None)
         return Series(values, index=index, name=name)
 
@@ -874,7 +878,7 @@ class HDFStore(object):
             lp = DataFrame(values, index=long_index, columns=fields)
 
             # need a better algorithm
-            tuple_index = long_index.get_tuple_index()
+            tuple_index = long_index._tuple_index
 
             unique_tuples = lib.fast_unique(tuple_index)
             unique_tuples = _asarray_tuplesafe(unique_tuples)
@@ -910,11 +914,11 @@ class HDFStore(object):
 
 def _convert_index(index):
     if isinstance(index, DatetimeIndex):
-        converted = np.asarray(index, dtype='i8')
+        converted = index.asi8
         return converted, 'datetime64', _tables().Int64Col()
     elif isinstance(index, (Int64Index, PeriodIndex)):
         atom = _tables().Int64Col()
-        return np.asarray(index, dtype=np.int64), 'integer', atom
+        return index.values, 'integer', atom
 
     inferred_type = lib.infer_dtype(index)
 
@@ -958,14 +962,22 @@ def _read_array(group, key):
     if isinstance(node, tables.VLArray):
         return data[0]
     else:
-        dtype = getattr(group._v_attrs, 'value_type', None)
+        attrs = node._v_attrs
+
+        dtype = getattr(attrs, 'value_type', None)
+        shape = getattr(attrs, 'shape', None)
+
+        if shape is not None:
+            # length 0 axis
+            return np.empty(shape, dtype=dtype)
+
         if dtype == 'datetime64':
             return np.array(data, dtype='M8[ns]')
         return data
 
 def _unconvert_index(data, kind):
     if kind == 'datetime64':
-        index = np.asarray(data, dtype='M8[ns]')
+        index = DatetimeIndex(data)
     elif kind == 'datetime':
         index = np.array([datetime.fromtimestamp(v) for v in data],
                          dtype=object)
